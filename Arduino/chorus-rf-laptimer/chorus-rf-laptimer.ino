@@ -219,6 +219,9 @@ uint8_t proxyBufDataSize = 0;
 #include "rx5808spi.h"
 #include "sounds.h"
 
+// ------- Delta5 added------
+#include "Delta5.h"
+
 // ----------------------------------------------------------------------------
 void setup() {
     // initialize digital pin 13 LED as an output.
@@ -246,6 +249,16 @@ void setup() {
     // Setup Done - Turn Status LED off.
     digitalLow(led);
 
+  while (!Serial) {
+  }; // Wait for the Serial port to initialise
+  Serial.print("Ready: ");
+  Serial.println(i2cSlaveAddress);
+
+  Wire.begin(i2cSlaveAddress); // I2C slave address setup
+  Wire.onReceive(i2cReceive); // Trigger 'i2cReceive' function on incoming data
+  Wire.onRequest(i2cTransmit); // Trigger 'i2cTransmit' function for outgoing data, on master request
+
+    
     DEBUG_CODE(
         pinMode(serialTimerPin, OUTPUT);
         pinMode(loopTimerPin, OUTPUT);
@@ -257,14 +270,14 @@ void loop() {
         digitalToggle(loopTimerPin);
     );
 
-    rssi = getFilteredRSSI();
+//    rssi = getFilteredRSSI();
 
     // check rssi threshold to identify when drone finishes the lap
     if (rssiThreshold > 0) { // threshold = 0 means that we don't check rssi values
         if(rssi > rssiThreshold) { // rssi above the threshold - drone is near
             if (allowEdgeGeneration) {  // we haven't fired event for this drone proximity case yet
                 allowEdgeGeneration = 0;
-                gen_rising_edge(pinRaspiInt);  //generate interrupt for EasyRaceLapTimer software
+//                gen_rising_edge(pinRaspiInt);  //generate interrupt for EasyRaceLapTimer software
 
                 uint32_t now = millis();
                 uint32_t diff = now - lastMilliseconds;
@@ -278,7 +291,7 @@ void loop() {
                             lapTimes[newLapIndex] = diff;
                             newLapIndex++;
                             lastLapsNotSent++;
-                            addToSendQueue(SEND_LAST_LAPTIMES);
+//                            addToSendQueue(SEND_LAST_LAPTIMES);
                         }
                         lastMilliseconds = now;
                         playLapTones(); // during the race play tone sequence even if no more laps can be logged
@@ -294,6 +307,61 @@ void loop() {
             digitalHigh(led);
         }
     }
+
+//-----Deta5 Start----
+  // Calculate the time it takes to run the main loop
+  uint32_t lastLoopTimeStamp = state.lastLoopTimeStamp;
+  state.lastLoopTimeStamp = micros();
+  state.loopTime = state.lastLoopTimeStamp - lastLoopTimeStamp;
+
+  state.rssiRaw = rssiRead();
+  state.rssiSmoothed = (settings.filterRatioFloat * (float)state.rssiRaw) + ((1.0f-settings.filterRatioFloat) * state.rssiSmoothed);
+  state.rssi = (int)state.rssiSmoothed;
+
+  if (state.rssiTrigger > 0) {
+    if (!state.crossing && state.rssi > state.rssiTrigger) {
+      state.crossing = true; // Quad is going through the gate
+      Serial.println("Crossing = True");
+    }
+
+    // Find the peak rssi and the time it occured during a crossing event
+    // Use the raw value to account for the delay in smoothing.
+    if (state.rssiRaw > state.rssiPeakRaw) {
+      state.rssiPeakRaw = state.rssiRaw;
+      state.rssiPeakRawTimeStamp = millis();
+    }
+
+    if (state.crossing) {
+      int triggerThreshold = settings.triggerThreshold;
+
+      // If in calibration mode, keep raising the trigger value
+      if (state.calibrationMode) {
+        state.rssiTrigger = max(state.rssiTrigger, state.rssi - settings.calibrationOffset);
+        // when calibrating, use a larger threshold
+        triggerThreshold = settings.calibrationThreshold;
+      }
+
+      state.rssiPeak = max(state.rssiPeak, state.rssi);
+
+      // Make sure the threshold does not put the trigger below 0 RSSI
+      // See if we have left the gate
+      if ((state.rssiTrigger > triggerThreshold) &&
+        (state.rssi < (state.rssiTrigger - triggerThreshold))) {
+        Serial.println("Crossing = False");
+        lastPass.rssiPeakRaw = state.rssiPeakRaw;
+        lastPass.rssiPeak = state.rssiPeak;
+        lastPass.timeStamp = state.rssiPeakRawTimeStamp;
+        lastPass.lap = lastPass.lap + 1;
+
+        state.crossing = false;
+        state.calibrationMode = false;
+        state.rssiPeakRaw = 0;
+        state.rssiPeak = 0;
+      }
+    }
+  }
+//}
+// ------ Delta5 end ----
 
     readSerialDataChunk();
 
